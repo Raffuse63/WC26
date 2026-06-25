@@ -1,0 +1,6 @@
+{
+  "name": "WC 2026 Schedule",
+  "description": "FIFA World Cup 2026 official match schedule with filters by team and date.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
