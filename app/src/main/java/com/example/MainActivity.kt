@@ -334,7 +334,7 @@ object DatabaseProvider {
             val instance = Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
-                "world_cup_database"
+                "world_cup_database_v3"
             ).fallbackToDestructiveMigration().build()
             db = instance
             instance
@@ -651,9 +651,7 @@ class ScheduleViewModel(application: android.app.Application) : AndroidViewModel
                 match.t1.lowercase().contains(q) ||
                         match.t2.lowercase().contains(q) ||
                         t1Name.contains(q) ||
-                        t2Name.contains(q) ||
-                        match.venue.lowercase().contains(q) ||
-                        match.group.lowercase().contains(q)
+                        t2Name.contains(q)
             }
             matchesDate && matchesQuery
         }
@@ -733,6 +731,55 @@ fun ScheduleApp(
 
     val listState = rememberLazyListState()
     
+    val todayIndex by remember(filteredMatches) {
+        derivedStateOf {
+            val todayString = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+            val nextMatch = TOURNAMENT_MATCHES.find { it.date >= todayString } ?: TOURNAMENT_MATCHES.firstOrNull()
+            if (nextMatch == null) {
+                -1
+            } else {
+                val groupedByDate = filteredMatches.groupBy { it.date }
+                var currentStage: String? = null
+                var targetIndex = -1
+                var indexCounter = 2 // Start after Hero (0) and Sticky Header (1)
+                
+                for ((date, matchesForDate) in groupedByDate) {
+                    val firstMatchOfDate = matchesForDate.firstOrNull()
+                    
+                    if (firstMatchOfDate != null && firstMatchOfDate.stage != currentStage) {
+                        currentStage = firstMatchOfDate.stage
+                        if (date == nextMatch.date) {
+                            targetIndex = indexCounter
+                            break
+                        }
+                        indexCounter++ // stage break
+                    }
+                    
+                    if (date == nextMatch.date) {
+                        targetIndex = indexCounter
+                        break
+                    }
+                    indexCounter++ // date header
+                    
+                    val matchIndexInDate = matchesForDate.indexOfFirst { it.matchNumber == nextMatch.matchNumber }
+                    if (matchIndexInDate != -1) {
+                        targetIndex = indexCounter + matchIndexInDate
+                        break
+                    }
+                    
+                    indexCounter += matchesForDate.size // matches
+                }
+                targetIndex
+            }
+        }
+    }
+
+    val showTopButton by remember(listState, todayIndex) {
+        derivedStateOf {
+            todayIndex != -1 && listState.firstVisibleItemIndex >= todayIndex
+        }
+    }
+    
     var selectedTab by remember { mutableStateOf(0) } // 0 = Matches, 1 = Points Table
     var selectedGroup by remember { mutableStateOf("A") }
     var editingMatch by remember { mutableStateOf<Match?>(null) }
@@ -804,7 +851,7 @@ fun ScheduleApp(
                                     modifier = Modifier
                                         .weight(1f)
                                         .testTag("searchInput"),
-                                    placeholder = { Text(text = "Search by TEAM or VENUE...", fontSize = 13.sp) },
+                                    placeholder = { Text(text = "Search by Team...", fontSize = 13.sp) },
                                     leadingIcon = {
                                         Icon(
                                             imageVector = Icons.Default.Search,
@@ -833,6 +880,17 @@ fun ScheduleApp(
                                 IconButton(
                                     onClick = {
                                         val calendar = Calendar.getInstance()
+                                        selectedDate?.let { sDate ->
+                                            try {
+                                                val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+                                                val parsedDate = sdf.parse(sDate)
+                                                if (parsedDate != null) {
+                                                    calendar.time = parsedDate
+                                                }
+                                            } catch (e: Exception) {
+                                                // ignore
+                                            }
+                                        }
                                         DatePickerDialog(
                                             context,
                                             { _, year, month, dayOfMonth ->
@@ -840,7 +898,9 @@ fun ScheduleApp(
                                                 val formattedDay = String.format("%02d", dayOfMonth)
                                                 viewModel.selectDate("$year-$formattedMonth-$formattedDay")
                                             },
-                                            2026, 5, 12 // Starts June 12, 2026
+                                            calendar.get(Calendar.YEAR),
+                                            calendar.get(Calendar.MONTH),
+                                            calendar.get(Calendar.DAY_OF_MONTH)
                                         ).apply {
                                             val minCal = Calendar.getInstance().apply { set(2026, 5, 12) }
                                             val maxCal = Calendar.getInstance().apply { set(2026, 6, 20) }
@@ -897,29 +957,13 @@ fun ScheduleApp(
                                 }
                             }
 
-                            // Matches count label
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.SportsSoccer,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "${filteredMatches.size} Matches shown",
-                                        fontWeight = FontWeight.Bold,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-
-                                if (selectedDate != null || searchQuery.isNotEmpty()) {
+                            // Reset Filters button when filter is active
+                            if (selectedDate != null || searchQuery.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     TextButton(
                                         onClick = { viewModel.clearFilters() },
                                         contentPadding = PaddingValues(0.dp)
@@ -1064,80 +1108,74 @@ fun ScheduleApp(
                 }
             }
 
-            // 2. Jump to Today button (small / compact size)
-            FloatingActionButton(
-                onClick = {
-                    val todayString = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-                    val nextMatch = TOURNAMENT_MATCHES.find { it.date >= todayString } 
-                        ?: TOURNAMENT_MATCHES.first()
-
-                    val matchesToUse = filteredMatches
-                    if (matchesToUse.isNotEmpty()) {
-                        val groupedByDate = matchesToUse.groupBy { it.date }
-                        var currentStage: String? = null
-                        
-                        var targetIndex = -1
-                        var indexCounter = 2 // Start after Hero (0) and Sticky Header (1)
-                        
-                        for ((date, matchesForDate) in groupedByDate) {
-                            val firstMatchOfDate = matchesForDate.firstOrNull()
-                            
-                            if (firstMatchOfDate != null && firstMatchOfDate.stage != currentStage) {
-                                currentStage = firstMatchOfDate.stage
-                                if (date == nextMatch.date) {
-                                    targetIndex = indexCounter
-                                    break
-                                }
-                                indexCounter++ // stage break
-                            }
-                            
-                            if (date == nextMatch.date) {
-                                targetIndex = indexCounter
-                                break
-                            }
-                            indexCounter++ // date header
-                            
-                            val matchIndexInDate = matchesForDate.indexOfFirst { it.matchNumber == nextMatch.matchNumber }
-                            if (matchIndexInDate != -1) {
-                                targetIndex = indexCounter + matchIndexInDate
-                                break
-                            }
-                            
-                            indexCounter += matchesForDate.size // matches
-                        }
-                        
+            // 2. Jump to Today or Move to Top button (dynamically switches based on scroll state)
+            if (showTopButton) {
+                FloatingActionButton(
+                    onClick = {
                         scope.launch {
-                            if (targetIndex != -1) {
-                                listState.animateScrollToItem(targetIndex)
+                            listState.animateScrollToItem(0)
+                        }
+                    },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = Color.White,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .height(38.dp)
+                        .testTag("todayBtn")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowUpward,
+                            contentDescription = "Move to Top",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "TOP",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+                }
+            } else {
+                FloatingActionButton(
+                    onClick = {
+                        scope.launch {
+                            if (todayIndex != -1) {
+                                listState.animateScrollToItem(todayIndex)
                             } else {
                                 listState.animateScrollToItem(2)
                             }
                         }
-                    }
-                },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = Color.White,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .height(38.dp)
-                    .testTag("todayBtn")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = Color.White,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .height(38.dp)
+                        .testTag("todayBtn")
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.MyLocation,
-                        contentDescription = "Jump Today",
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = "Today",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        letterSpacing = 0.5.sp
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.MyLocation,
+                            contentDescription = "Jump Today",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Today",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
                 }
             }
         }
@@ -1639,7 +1677,7 @@ fun HeroHeader() {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 12.dp, horizontal = 4.dp),
+                        .padding(vertical = 6.dp, horizontal = 4.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1660,21 +1698,21 @@ fun HeroHeader() {
 fun StatItem(number: String, label: String) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.width(62.dp)
+        modifier = Modifier.width(36.dp)
     ) {
         Text(
             text = number,
-            fontSize = 22.sp,
+            fontSize = 11.sp,
             fontWeight = FontWeight.Black,
             color = MaterialTheme.colorScheme.primary,
-            lineHeight = 24.sp
+            lineHeight = 12.sp
         )
         Text(
             text = label.uppercase(Locale.getDefault()),
-            fontSize = 9.sp,
+            fontSize = 5.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-            letterSpacing = 1.sp
+            letterSpacing = 0.5.sp
         )
     }
 }
@@ -1684,7 +1722,7 @@ fun DividerLine() {
     Box(
         modifier = Modifier
             .width(1.dp)
-            .height(28.dp)
+            .height(14.dp)
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
@@ -1953,7 +1991,6 @@ fun MatchCardView(
             .testTag("match_card_${match.matchNumber}")
             .pointerInput(Unit) {
                 detectTapGestures(
-                    onTap = { onTap() },
                     onDoubleTap = { onTap() }
                 )
             },
