@@ -371,6 +371,28 @@ val GROUP_TEAMS = mapOf(
     "L" to listOf("ENG", "CRO", "GHA", "PAN")
 )
 
+val SLOT_OVERRIDE_IDS = mapOf(
+    "3ABCDF" to 10001,
+    "3CDFGH" to 10002,
+    "3CEFHI" to 10003,
+    "3EHJK" to 10004,
+    "3AEHIJ" to 10005,
+    "3BEFIJ" to 10006,
+    "3EFGIJ" to 10007,
+    "3DEJKL" to 10008
+)
+
+val SLOT_GROUPS = mapOf(
+    "3ABCDF" to listOf("A", "B", "C", "D", "F"),
+    "3CDFGH" to listOf("C", "D", "F", "G", "H"),
+    "3CEFHI" to listOf("C", "E", "F", "H", "I"),
+    "3EHJK" to listOf("E", "H", "J", "K"),
+    "3AEHIJ" to listOf("A", "E", "H", "I", "J"),
+    "3BEFIJ" to listOf("B", "E", "F", "I", "J"),
+    "3EFGIJ" to listOf("E", "F", "G", "I", "J"),
+    "3DEJKL" to listOf("D", "E", "J", "K", "L")
+)
+
 fun computeGroupStandings(
     groupLetter: String,
     results: Map<Int, MatchResultEntity>
@@ -631,9 +653,17 @@ class ScheduleViewModel(application: android.app.Application) : AndroidViewModel
         val shouldResolve = groupCompleted || manualUpdate
         val thirdPlacedMappings = if (shouldResolve) resolveThirdPlacedSlots(resultsMap) else emptyMap()
 
+        val finalThirdPlacedMappings = thirdPlacedMappings.toMutableMap()
+        SLOT_OVERRIDE_IDS.forEach { (slotCode, slotId) ->
+            val overrideEntity = resultsMap[slotId]
+            if (overrideEntity != null && overrideEntity.winnerTeamCode != null) {
+                finalThirdPlacedMappings[slotCode] = overrideEntity.winnerTeamCode
+            }
+        }
+
         val resolvedList = TOURNAMENT_MATCHES.map { match ->
-            val resolvedT1 = resolveTeamCode(match.t1, resultsMap, thirdPlacedMappings, shouldResolve)
-            val resolvedT2 = resolveTeamCode(match.t2, resultsMap, thirdPlacedMappings, shouldResolve)
+            val resolvedT1 = resolveTeamCode(match.t1, resultsMap, finalThirdPlacedMappings, shouldResolve)
+            val resolvedT2 = resolveTeamCode(match.t2, resultsMap, finalThirdPlacedMappings, shouldResolve)
             match.copy(
                 t1 = resolvedT1,
                 t2 = resolvedT2
@@ -683,6 +713,20 @@ class ScheduleViewModel(application: android.app.Application) : AndroidViewModel
     fun deleteMatchResult(matchNumber: Int) {
         viewModelScope.launch {
             dao.deleteResult(matchNumber)
+        }
+    }
+
+    fun saveSlotOverride(slotCode: String, teamCode: String) {
+        val slotId = SLOT_OVERRIDE_IDS[slotCode] ?: return
+        viewModelScope.launch {
+            dao.insertResult(MatchResultEntity(slotId, null, null, teamCode))
+        }
+    }
+
+    fun deleteSlotOverride(slotCode: String) {
+        val slotId = SLOT_OVERRIDE_IDS[slotCode] ?: return
+        viewModelScope.launch {
+            dao.deleteResult(slotId)
         }
     }
 }
@@ -783,6 +827,7 @@ fun ScheduleApp(
     var selectedTab by remember { mutableStateOf(0) } // 0 = Matches, 1 = Points Table
     var selectedGroup by remember { mutableStateOf("A") }
     var editingMatch by remember { mutableStateOf<Match?>(null) }
+    var activeSlotCodeToCustomize by remember { mutableStateOf<String?>(null) }
 
     Box(
         modifier = modifier
@@ -1048,7 +1093,8 @@ fun ScheduleApp(
                             MatchCardView(
                                 match = match,
                                 result = resultsMap[match.matchNumber],
-                                onTap = { editingMatch = match }
+                                onTap = { editingMatch = match },
+                                onSlotDoubleTap = { slotCode -> activeSlotCodeToCustomize = slotCode }
                             )
                         }
                     }
@@ -1195,6 +1241,25 @@ fun ScheduleApp(
                 viewModel.deleteMatchResult(match.matchNumber)
                 editingMatch = null
             }
+        )
+    }
+
+    // Customize Third-Placed Slot Dialog
+    activeSlotCodeToCustomize?.let { slotCode ->
+        val hasOverride = resultsMap[SLOT_OVERRIDE_IDS[slotCode]]?.winnerTeamCode != null
+        ThirdPlaceSlotSelectionDialog(
+            slotCode = slotCode,
+            resultsMap = resultsMap,
+            onDismiss = { activeSlotCodeToCustomize = null },
+            onSelectTeam = { teamCode ->
+                viewModel.saveSlotOverride(slotCode, teamCode)
+                activeSlotCodeToCustomize = null
+            },
+            onClearOverride = {
+                viewModel.deleteSlotOverride(slotCode)
+                activeSlotCodeToCustomize = null
+            },
+            hasOverride = hasOverride
         )
     }
 }
@@ -1964,7 +2029,8 @@ fun DateHeaderView(
 fun MatchCardView(
     match: Match,
     result: MatchResultEntity? = null,
-    onTap: () -> Unit = {}
+    onTap: () -> Unit = {},
+    onSlotDoubleTap: (String) -> Unit = {}
 ) {
     val isDark = isSystemInDarkTheme()
     val stageStyle = STAGE_STYLES[match.stage] ?: STAGE_STYLES["group"]!!
@@ -1983,6 +2049,10 @@ fun MatchCardView(
         }
         else -> null
     }
+
+    val originalMatch = TOURNAMENT_MATCHES.find { it.matchNumber == match.matchNumber }
+    val originalT1 = originalMatch?.t1 ?: match.t1
+    val originalT2 = originalMatch?.t2 ?: match.t2
 
     Card(
         modifier = Modifier
@@ -2066,7 +2136,21 @@ fun MatchCardView(
                     horizontalArrangement = Arrangement.Center
                 ) {
                     // Team 1
-                    Box(modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .then(
+                                if (SLOT_GROUPS.containsKey(originalT1)) {
+                                    Modifier.pointerInput(Unit) {
+                                        detectTapGestures(
+                                            onDoubleTap = { onSlotDoubleTap(originalT1) }
+                                        )
+                                    }
+                                } else {
+                                    Modifier
+                                }
+                            )
+                    ) {
                         TeamBlock(
                             code = match.t1,
                             isRightAligned = false,
@@ -2125,7 +2209,21 @@ fun MatchCardView(
                     }
 
                     // Team 2
-                    Box(modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .then(
+                                if (SLOT_GROUPS.containsKey(originalT2)) {
+                                    Modifier.pointerInput(Unit) {
+                                        detectTapGestures(
+                                            onDoubleTap = { onSlotDoubleTap(originalT2) }
+                                        )
+                                    }
+                                } else {
+                                    Modifier
+                                }
+                            )
+                    ) {
                         TeamBlock(
                             code = match.t2,
                             isRightAligned = true,
@@ -2300,4 +2398,115 @@ fun formatTo12Hour(time24: String): String {
     } catch (e: Exception) {
         time24
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ThirdPlaceSlotSelectionDialog(
+    slotCode: String,
+    resultsMap: Map<Int, MatchResultEntity>,
+    onDismiss: () -> Unit,
+    onSelectTeam: (String) -> Unit,
+    onClearOverride: () -> Unit,
+    hasOverride: Boolean
+) {
+    val allowedGroups = SLOT_GROUPS[slotCode] ?: emptyList()
+    
+    // Gather only the 3rd-placed team of each allowed group
+    val teams = allowedGroups.mapNotNull { groupLetter ->
+        val standings = computeGroupStandings(groupLetter, resultsMap)
+        val thirdPlacedStanding = standings.getOrNull(2) // 0-indexed: 0=1st, 1=2nd, 2=3rd
+        if (thirdPlacedStanding != null) {
+            val teamCode = thirdPlacedStanding.teamCode
+            val teamName = TEAM_NAMES[teamCode] ?: "Unknown"
+            Triple(teamCode, teamName, "Group $groupLetter (3rd Place)")
+        } else {
+            null
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Select Team for Slot $slotCode",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "Double-tap triggered selection. This slot allows third-placed teams from Groups: ${allowedGroups.joinToString(", ")}",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 300.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(teams) { (code, name, groupLabel) ->
+                        Card(
+                            onClick = {
+                                onSelectTeam(code)
+                                onDismiss()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                            ),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = getTeamFlag(code),
+                                    fontSize = 24.sp,
+                                    modifier = Modifier.padding(end = 12.dp)
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "$name ($code)",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
+                                    )
+                                    Text(
+                                        text = groupLabel,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (hasOverride) {
+                TextButton(
+                    onClick = {
+                        onClearOverride()
+                        onDismiss()
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Reset to Auto")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
